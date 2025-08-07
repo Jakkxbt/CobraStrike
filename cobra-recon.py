@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import warnings
+warnings.filterwarnings("ignore", message="Unverified HTTPS request*")
 import argparse
 import os
 import re
@@ -9,6 +11,7 @@ from colorama import Fore, Style, init
 
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 
 
 init(autoreset=True)
