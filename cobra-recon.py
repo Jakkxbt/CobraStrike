@@ -4,6 +4,8 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 from colorama import Fore, Style, init
 
